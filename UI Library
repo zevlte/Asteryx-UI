@@ -1,5 +1,12 @@
 --==================================================
--- ASTERYX UI LIBRARY
+-- ASTERYX UI LIBRARY (COMPAT PATCH)
+-- Keeps the original Asteryx look while adding a
+-- more forgiving API for libraries that use:
+-- ui:Create(...)
+-- window:Tab(...)
+-- tab:Textbox(...)
+-- tab:Dropdown(...)
+-- tab:Banner(...)
 --==================================================
 
 local Players = game:GetService("Players")
@@ -10,6 +17,7 @@ local Workspace = game:GetService("Workspace")
 local MarketplaceService = game:GetService("MarketplaceService")
 local Stats = game:GetService("Stats")
 local HttpService = game:GetService("HttpService")
+local SoundService = game:GetService("SoundService")
 
 local LP = Players.LocalPlayer
 local PlayerGui = LP:WaitForChild("PlayerGui")
@@ -50,7 +58,8 @@ local DEFAULT_OPTIONS = {
 	Size = Vector2.new(540, 330),
 	ShowProfile = true,
 	ShowSettingsTab = true,
-	DestroyExisting = true
+	DestroyExisting = true,
+	StartupSound = nil
 }
 
 local Asteryx = {}
@@ -379,7 +388,9 @@ local function createButtonControl(parent, colors, text, callback)
 		end
 	end)
 
-	return btn
+	return {
+		Instance = btn
+	}
 end
 
 local function createToggleControl(parent, colors, text, default, callback)
@@ -419,7 +430,7 @@ local function createToggleControl(parent, colors, text, default, callback)
 	knob.BorderSizePixel = 0
 	corner(knob, 999)
 
-	local function setToggle(value)
+	local function setToggle(value, silent)
 		state = value
 		tween(toggleBg, TweenInfo.new(0.16), {
 			BackgroundColor3 = state and colors.ButtonActive or colors.PanelDark
@@ -429,7 +440,7 @@ local function createToggleControl(parent, colors, text, default, callback)
 			BackgroundColor3 = state and colors.AccentGlow or colors.Text
 		}):Play()
 
-		if callback then
+		if callback and not silent then
 			callback(state)
 		end
 	end
@@ -438,18 +449,51 @@ local function createToggleControl(parent, colors, text, default, callback)
 		setToggle(not state)
 	end)
 
-	setToggle(state)
+	setToggle(state, true)
 
 	return {
 		Instance = holder,
-		Set = setToggle,
+		Set = function(value)
+			setToggle(value, false)
+		end,
 		Get = function()
 			return state
 		end
 	}
 end
 
-local function createSliderControl(parent, colors, text, min, max, default, callback)
+local function getDecimalPlaces(step)
+	local text = tostring(step or 1)
+	local dot = text:find("%.")
+	if not dot then
+		return 0
+	end
+	return math.clamp(#text - dot, 0, 4)
+end
+
+local function roundToStep(value, min, max, step)
+	step = tonumber(step) or 1
+	if step <= 0 then
+		step = 1
+	end
+
+	local snapped = min + (math.floor(((value - min) / step) + 0.5) * step)
+	return math.clamp(snapped, min, max)
+end
+
+local function formatValue(value, step)
+	if math.abs((step or 1) - math.floor(step or 1)) < 0.0001 then
+		return tostring(math.floor(value + 0.5))
+	end
+
+	local places = getDecimalPlaces(step)
+	local pattern = "%." .. tostring(places) .. "f"
+	local formatted = string.format(pattern, value)
+	formatted = formatted:gsub("0+$", ""):gsub("%.$", "")
+	return formatted
+end
+
+local function createSliderControl(parent, colors, text, min, max, default, step, callback)
 	local value = math.clamp(default or min, min, max)
 	local dragging = false
 
@@ -468,7 +512,7 @@ local function createSliderControl(parent, colors, text, min, max, default, call
 	label.Position = UDim2.fromOffset(10, 5)
 	label.Size = UDim2.new(1, -70, 0, 15)
 
-	local valueLabel = makeText(holder, tostring(value), 10, Enum.Font.GothamBold, colors.AccentGlow, Enum.TextXAlignment.Right, Enum.TextYAlignment.Center)
+	local valueLabel = makeText(holder, "", 10, Enum.Font.GothamBold, colors.AccentGlow, Enum.TextXAlignment.Right, Enum.TextYAlignment.Center)
 	valueLabel.Position = UDim2.new(1, -56, 0, 5)
 	valueLabel.Size = UDim2.fromOffset(44, 15)
 
@@ -497,13 +541,15 @@ local function createSliderControl(parent, colors, text, min, max, default, call
 	knob.BorderSizePixel = 0
 	corner(knob, 999)
 
-	local function setSliderFromAlpha(alpha)
+	local function setSliderFromAlpha(alpha, silent)
 		alpha = math.clamp(alpha, 0, 1)
-		value = math.floor((min + (max - min) * alpha) + 0.5)
-		fill.Size = UDim2.new(alpha, 0, 1, 0)
-		knob.Position = UDim2.new(alpha, 0, 0.5, 0)
-		valueLabel.Text = tostring(value)
-		if callback then
+		local rawValue = min + ((max - min) * alpha)
+		value = roundToStep(rawValue, min, max, step)
+		local displayAlpha = max == min and 0 or ((value - min) / (max - min))
+		fill.Size = UDim2.new(displayAlpha, 0, 1, 0)
+		knob.Position = UDim2.new(displayAlpha, 0, 0.5, 0)
+		valueLabel.Text = formatValue(value, step)
+		if callback and not silent then
 			callback(value)
 		end
 	end
@@ -534,9 +580,9 @@ local function createSliderControl(parent, colors, text, min, max, default, call
 	end)
 
 	if max == min then
-		setSliderFromAlpha(0)
+		setSliderFromAlpha(0, true)
 	else
-		setSliderFromAlpha((value - min) / (max - min))
+		setSliderFromAlpha((value - min) / (max - min), true)
 	end
 
 	return {
@@ -544,11 +590,275 @@ local function createSliderControl(parent, colors, text, min, max, default, call
 		Set = function(newValue)
 			local clamped = math.clamp(newValue, min, max)
 			local alpha = max == min and 0 or ((clamped - min) / (max - min))
-			setSliderFromAlpha(alpha)
+			setSliderFromAlpha(alpha, false)
 		end,
 		Get = function()
 			return value
 		end
+	}
+end
+
+local function createTextboxControl(parent, colors, text, placeholder, callback)
+	local holder = Instance.new("Frame")
+	holder.Parent = parent
+	holder.AnchorPoint = Vector2.new(0.5, 0)
+	holder.Position = UDim2.new(0.5, 0, 0, 0)
+	holder.Size = UDim2.new(1, -CONTENT_INSET, 0, 52)
+	holder.BackgroundColor3 = colors.Button
+	holder.BorderSizePixel = 0
+	holder.ClipsDescendants = false
+	corner(holder, 9)
+	stroke(holder, colors.Stroke, 1, 0.55)
+
+	local label = makeText(holder, text, 11, Enum.Font.GothamSemibold, colors.Text, Enum.TextXAlignment.Left, Enum.TextYAlignment.Center)
+	label.Position = UDim2.fromOffset(10, 6)
+	label.Size = UDim2.new(1, -20, 0, 14)
+
+	local box = Instance.new("TextBox")
+	box.Parent = holder
+	box.Position = UDim2.fromOffset(10, 25)
+	box.Size = UDim2.new(1, -20, 0, 18)
+	box.BackgroundColor3 = colors.PanelDark
+	box.BorderSizePixel = 0
+	box.ClearTextOnFocus = false
+	box.Text = ""
+	box.PlaceholderText = placeholder or ""
+	box.PlaceholderColor3 = colors.SubText
+	box.TextColor3 = colors.Text
+	box.Font = Enum.Font.Gotham
+	box.TextSize = 10
+	box.TextXAlignment = Enum.TextXAlignment.Left
+	corner(box, 7)
+	stroke(box, colors.Stroke, 1, 0.45)
+	pad(box, 8, 8, 0, 0)
+
+	box.FocusLost:Connect(function(enterPressed)
+		if callback then
+			callback(box.Text, enterPressed)
+		end
+	end)
+
+	return {
+		Instance = holder,
+		Input = box,
+		Set = function(value)
+			box.Text = tostring(value or "")
+		end,
+		Get = function()
+			return box.Text
+		end
+	}
+end
+
+local function createDropdownControl(parent, colors, text, items, defaultValue, callback)
+	local options = {}
+	for _, value in ipairs(items or {}) do
+		options[#options + 1] = tostring(value)
+	end
+
+	local selected = tostring(defaultValue or options[1] or "")
+	local open = false
+	local optionButtons = {}
+
+	local holder = Instance.new("Frame")
+	holder.Parent = parent
+	holder.AnchorPoint = Vector2.new(0.5, 0)
+	holder.Position = UDim2.new(0.5, 0, 0, 0)
+	holder.Size = UDim2.new(1, -CONTENT_INSET, 0, CONTROL_HEIGHT)
+	holder.AutomaticSize = Enum.AutomaticSize.Y
+	holder.BackgroundColor3 = colors.Button
+	holder.BorderSizePixel = 0
+	holder.ClipsDescendants = true
+	corner(holder, 9)
+	stroke(holder, colors.Stroke, 1, 0.55)
+
+	local layout = Instance.new("UIListLayout")
+	layout.Parent = holder
+	layout.SortOrder = Enum.SortOrder.LayoutOrder
+	layout.Padding = UDim.new(0, 0)
+
+	local header = Instance.new("TextButton")
+	header.Parent = holder
+	header.Size = UDim2.new(1, 0, 0, CONTROL_HEIGHT)
+	header.BackgroundTransparency = 1
+	header.Text = ""
+	header.AutoButtonColor = false
+	header.LayoutOrder = 1
+
+	local label = makeText(header, text, 11, Enum.Font.GothamSemibold, colors.Text, Enum.TextXAlignment.Left, Enum.TextYAlignment.Center)
+	label.Position = UDim2.fromOffset(10, 0)
+	label.Size = UDim2.new(1, -90, 1, 0)
+
+	local valueLabel = makeText(header, selected, 10, Enum.Font.GothamBold, colors.AccentGlow, Enum.TextXAlignment.Right, Enum.TextYAlignment.Center)
+	valueLabel.Position = UDim2.new(1, -34, 0, 0)
+	valueLabel.Size = UDim2.fromOffset(20, CONTROL_HEIGHT)
+
+	local arrow = makeText(header, "v", 12, Enum.Font.GothamBold, colors.AccentGlow, Enum.TextXAlignment.Center, Enum.TextYAlignment.Center)
+	arrow.Position = UDim2.new(1, -18, 0, 0)
+	arrow.Size = UDim2.fromOffset(10, CONTROL_HEIGHT)
+
+	local optionsWrap = Instance.new("Frame")
+	optionsWrap.Parent = holder
+	optionsWrap.Size = UDim2.new(1, 0, 0, 0)
+	optionsWrap.AutomaticSize = Enum.AutomaticSize.Y
+	optionsWrap.BackgroundTransparency = 1
+	optionsWrap.Visible = false
+	optionsWrap.LayoutOrder = 2
+
+	local optionsLayout = Instance.new("UIListLayout")
+	optionsLayout.Parent = optionsWrap
+	optionsLayout.SortOrder = Enum.SortOrder.LayoutOrder
+	optionsLayout.Padding = UDim.new(0, 4)
+
+	local optionsPad = pad(optionsWrap, 8, 8, 0, 8)
+	optionsPad.PaddingTop = UDim.new(0, 0)
+
+	local function setOpen(state)
+		open = state
+		optionsWrap.Visible = open
+		arrow.Text = open and "^" or "v"
+	end
+
+	local function selectValue(value, silent)
+		selected = tostring(value or "")
+		valueLabel.Text = selected
+		setOpen(false)
+		if callback and not silent then
+			callback(selected)
+		end
+	end
+
+	for index, option in ipairs(options) do
+		local optionButton = Instance.new("TextButton")
+		optionButton.Parent = optionsWrap
+		optionButton.Size = UDim2.new(1, 0, 0, 24)
+		optionButton.BackgroundColor3 = colors.PanelDark
+		optionButton.BorderSizePixel = 0
+		optionButton.Text = option
+		optionButton.TextColor3 = colors.Text
+		optionButton.Font = Enum.Font.Gotham
+		optionButton.TextSize = 10
+		optionButton.AutoButtonColor = false
+		optionButton.LayoutOrder = index
+		corner(optionButton, 7)
+		stroke(optionButton, colors.Stroke, 1, 0.5)
+
+		optionButton.MouseEnter:Connect(function()
+			tween(optionButton, TweenInfo.new(0.12), {BackgroundColor3 = colors.ButtonHover}):Play()
+		end)
+
+		optionButton.MouseLeave:Connect(function()
+			tween(optionButton, TweenInfo.new(0.12), {BackgroundColor3 = colors.PanelDark}):Play()
+		end)
+
+		optionButton.MouseButton1Click:Connect(function()
+			selectValue(option)
+		end)
+
+		optionButtons[#optionButtons + 1] = optionButton
+	end
+
+	header.MouseButton1Click:Connect(function()
+		setOpen(not open)
+	end)
+
+	selectValue(selected, true)
+
+	return {
+		Instance = holder,
+		Set = function(value)
+			selectValue(value, false)
+		end,
+		Get = function()
+			return selected
+		end,
+		SetOptions = function(newOptions)
+			options = {}
+			for _, button in ipairs(optionButtons) do
+				button:Destroy()
+			end
+			optionButtons = {}
+
+			for _, value in ipairs(newOptions or {}) do
+				options[#options + 1] = tostring(value)
+			end
+
+			for index, option in ipairs(options) do
+				local optionButton = Instance.new("TextButton")
+				optionButton.Parent = optionsWrap
+				optionButton.Size = UDim2.new(1, 0, 0, 24)
+				optionButton.BackgroundColor3 = colors.PanelDark
+				optionButton.BorderSizePixel = 0
+				optionButton.Text = option
+				optionButton.TextColor3 = colors.Text
+				optionButton.Font = Enum.Font.Gotham
+				optionButton.TextSize = 10
+				optionButton.AutoButtonColor = false
+				optionButton.LayoutOrder = index
+				corner(optionButton, 7)
+				stroke(optionButton, colors.Stroke, 1, 0.5)
+
+				optionButton.MouseEnter:Connect(function()
+					tween(optionButton, TweenInfo.new(0.12), {BackgroundColor3 = colors.ButtonHover}):Play()
+				end)
+
+				optionButton.MouseLeave:Connect(function()
+					tween(optionButton, TweenInfo.new(0.12), {BackgroundColor3 = colors.PanelDark}):Play()
+				end)
+
+				optionButton.MouseButton1Click:Connect(function()
+					selectValue(option)
+				end)
+
+				optionButtons[#optionButtons + 1] = optionButton
+			end
+
+			if #options > 0 then
+				selectValue(options[1], true)
+			else
+				selectValue("", true)
+			end
+		end
+	}
+end
+
+local function normalizeBannerAsset(asset)
+	if type(asset) == "number" then
+		return "rbxassetid://" .. tostring(asset)
+	end
+
+	asset = tostring(asset or "")
+	if asset:find("rbxassetid://", 1, true) then
+		return asset
+	end
+	if asset:match("^%d+$") then
+		return "rbxassetid://" .. asset
+	end
+	return asset
+end
+
+local function createBannerControl(parent, colors, asset, height)
+	local holder = Instance.new("Frame")
+	holder.Parent = parent
+	holder.AnchorPoint = Vector2.new(0.5, 0)
+	holder.Position = UDim2.new(0.5, 0, 0, 0)
+	holder.Size = UDim2.new(1, -CONTENT_INSET, 0, tonumber(height) or 140)
+	holder.BackgroundColor3 = colors.PanelSoft
+	holder.BorderSizePixel = 0
+	holder.ClipsDescendants = true
+	corner(holder, 10)
+	stroke(holder, colors.Stroke, 1, 0.5)
+
+	local image = Instance.new("ImageLabel")
+	image.Parent = holder
+	image.Size = UDim2.new(1, 0, 1, 0)
+	image.BackgroundTransparency = 1
+	image.Image = normalizeBannerAsset(asset)
+	image.ScaleType = Enum.ScaleType.Crop
+
+	return {
+		Instance = holder,
+		Image = image
 	}
 end
 
@@ -611,6 +921,53 @@ end
 local function registerConnection(window, connection)
 	window.Connections[#window.Connections + 1] = connection
 	return connection
+end
+
+local function parseCompatibilityOptions(options)
+	options = options or {}
+
+	local parsed = mergeTable(DEFAULT_OPTIONS, options)
+	parsed.Colors = mergeTable(DEFAULT_COLORS, parsed.Colors or {})
+
+	if options.ThemeColor or options.ThemeGradient or options.ThemeFont then
+		parsed.LegacyThemeIgnored = true
+	end
+
+	if not options.Subtitle and options.Name then
+		parsed.Subtitle = DEFAULT_OPTIONS.Subtitle
+	end
+
+	if not options.HubName and options.Name then
+		parsed.HubName = sanitizeFolderName(options.Name)
+	end
+
+	if not options.SettingsFolder then
+		parsed.SettingsFolder = sanitizeFolderName(parsed.HubName)
+	end
+
+	return parsed
+end
+
+local function tryPlayStartupSound(soundId)
+	if not soundId or soundId == "" then
+		return
+	end
+
+	task.spawn(function()
+		local sound = Instance.new("Sound")
+		sound.SoundId = tostring(soundId)
+		sound.Volume = 0.5
+		sound.Parent = SoundService
+		sound:Play()
+		sound.Ended:Once(function()
+			sound:Destroy()
+		end)
+		task.delay(8, function()
+			if sound and sound.Parent then
+				sound:Destroy()
+			end
+		end)
+	end)
 end
 
 function Window:_setTabVisual(button, active)
@@ -791,7 +1148,7 @@ function Window:SetToggleKey(keyCode)
 	saveSettings(self.Options.SettingsFolder, self.Settings)
 
 	if self.KeybindButton then
-		self.KeybindButton.Text = "Hide Keybind: " .. keyCode.Name
+		self.KeybindButton.Instance.Text = "Hide Keybind: " .. keyCode.Name
 	end
 
 	return true
@@ -852,8 +1209,8 @@ function Window:_createSettingsTab()
 	tab:Header("Settings", "Useful settings only.")
 
 	self.KeybindButton = createButtonControl(tab.Page, self.Colors, "Hide Keybind: " .. self.ToggleKey.Name, function()
-		self.KeybindButton.Text = "Press any key..."
-		self.KeybindButton:SetAttribute("Waiting", true)
+		self.KeybindButton.Instance.Text = "Press any key..."
+		self.KeybindButton.Instance:SetAttribute("Waiting", true)
 	end)
 
 	self.SettingsTab = tab
@@ -1018,6 +1375,10 @@ function Window:CreateTab(name, iconName)
 	return tab
 end
 
+function Window:Tab(name, iconName)
+	return self:CreateTab(name, iconName)
+end
+
 function Window:GetTab(name)
 	return self.Tabs[name]
 end
@@ -1051,16 +1412,96 @@ function Tab:Paragraph(title, body)
 	return createParagraph(self.Page, self.Window.Colors, title, body)
 end
 
-function Tab:Button(text, callback)
+function Tab:Banner(asset, height)
+	return createBannerControl(self.Page, self.Window.Colors, asset, height)
+end
+
+function Tab:Button(text, descriptionOrCallback, maybeCallback)
+	local callback = descriptionOrCallback
+	if type(descriptionOrCallback) ~= "function" then
+		callback = maybeCallback
+	end
 	return createButtonControl(self.Page, self.Window.Colors, text, callback)
 end
 
-function Tab:Toggle(text, default, callback)
+function Tab:Toggle(text, defaultOrDescription, valueOrCallback, maybeCallback)
+	local default = false
+	local callback = nil
+
+	if type(defaultOrDescription) == "boolean" then
+		default = defaultOrDescription
+		if type(valueOrCallback) == "function" then
+			callback = valueOrCallback
+		else
+			callback = maybeCallback
+		end
+	elseif type(defaultOrDescription) == "string" then
+		if type(valueOrCallback) == "boolean" then
+			default = valueOrCallback
+			callback = maybeCallback
+		else
+			callback = valueOrCallback
+		end
+	elseif type(defaultOrDescription) == "function" then
+		callback = defaultOrDescription
+	end
+
 	return createToggleControl(self.Page, self.Window.Colors, text, default, callback)
 end
 
-function Tab:Slider(text, min, max, default, callback)
-	return createSliderControl(self.Page, self.Window.Colors, text, min, max, default, callback)
+function Tab:Slider(text, a, b, c, d, e)
+	local minValue
+	local maxValue
+	local defaultValue
+	local stepValue = 1
+	local callback
+
+	if type(d) == "function" and e == nil then
+		minValue = tonumber(a) or 0
+		maxValue = tonumber(b) or 100
+		defaultValue = tonumber(c) or minValue
+		callback = d
+	else
+		defaultValue = tonumber(a) or 0
+		minValue = tonumber(b) or 0
+		maxValue = tonumber(c) or 100
+		stepValue = tonumber(d) or 1
+		callback = e
+	end
+
+	if minValue > maxValue then
+		minValue, maxValue = maxValue, minValue
+	end
+
+	defaultValue = math.clamp(defaultValue, minValue, maxValue)
+
+	return createSliderControl(self.Page, self.Window.Colors, text, minValue, maxValue, defaultValue, stepValue, callback)
+end
+
+function Tab:Textbox(text, placeholderOrCallback, maybeCallback)
+	local placeholder = ""
+	local callback = maybeCallback
+
+	if type(placeholderOrCallback) == "function" then
+		callback = placeholderOrCallback
+	else
+		placeholder = tostring(placeholderOrCallback or "")
+	end
+
+	return createTextboxControl(self.Page, self.Window.Colors, text, placeholder, callback)
+end
+
+function Tab:Dropdown(text, items, defaultOrCallback, maybeCallback)
+	local default = nil
+	local callback = maybeCallback
+
+	if type(defaultOrCallback) == "function" then
+		callback = defaultOrCallback
+	else
+		default = defaultOrCallback
+	end
+
+	return createDropdownControl(self.Page, self.Window.Colors, text, items, default, callback)
 end
 
 function Tab:Spacer(height)
@@ -1078,8 +1519,7 @@ function Tab:GetContainer()
 end
 
 function Asteryx:Create(options)
-	options = mergeTable(DEFAULT_OPTIONS, options or {})
-	options.Colors = mergeTable(DEFAULT_COLORS, options.Colors or {})
+	options = parseCompatibilityOptions(options)
 
 	if options.DestroyExisting ~= false then
 		local oldGui = PlayerGui:FindFirstChild(options.HubName)
@@ -1358,8 +1798,8 @@ function Asteryx:Create(options)
 			return
 		end
 
-		if window.KeybindButton and window.KeybindButton:GetAttribute("Waiting") and input.UserInputType == Enum.UserInputType.Keyboard then
-			window.KeybindButton:SetAttribute("Waiting", false)
+		if window.KeybindButton and window.KeybindButton.Instance:GetAttribute("Waiting") and input.UserInputType == Enum.UserInputType.Keyboard then
+			window.KeybindButton.Instance:SetAttribute("Waiting", false)
 			window:SetToggleKey(input.KeyCode)
 			return
 		end
@@ -1382,6 +1822,7 @@ function Asteryx:Create(options)
 	end
 
 	window:_applyLayout()
+	tryPlayStartupSound(options.StartupSound)
 
 	return window
 end
