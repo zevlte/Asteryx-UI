@@ -1,8 +1,6 @@
---==================================================
--- ASTERYX HUB UI (POLISHED RESPONSIVE REWORK)
--- No shadow | No blur | No notifications
--- Clean tabs | Smooth sliders | Better alignment
---==================================================
+--==================================================--
+-- ASTERYX UI (POLISHED REWORK) by Zevlte da goat --
+--==================================================--
 
 local Players = game:GetService("Players")
 local UIS = game:GetService("UserInputService")
